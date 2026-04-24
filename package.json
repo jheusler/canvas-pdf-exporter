@@ -1,0 +1,8 @@
+{
+  "name": "canvas-pdf-exporter",
+  "version": "1.0.0",
+  "main": "export.js",
+  "dependencies": {
+    "puppeteer": "^21.0.0"
+  }
+}
