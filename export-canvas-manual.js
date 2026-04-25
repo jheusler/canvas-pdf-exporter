@@ -277,19 +277,15 @@ async function expandAllModules(page) {
 
 async function collectModuleLinks(page, modulesUrl) {
   const excludedTitlePatterns = [
-    'discussion:',
-    'practice:',
+    'discussion',
     'practice',
-    'practice 1:',
-    'practice 2:',
-    'exit ticket:',
-    'activating prior knowledge:',
-    'assignment:',
-    'quiz:',
-    'checkpoint:',
-    'reflection:',
-    'survey:',
-    'final practice:',
+    'assignment',
+    'quiz',
+    'exit ticket',
+    'reflection',
+    'survey',
+    'checkpoint',
+    'activating prior knowledge',
   ];
 
   const isExcludedTitle = (title) => {
@@ -297,59 +293,43 @@ async function collectModuleLinks(page, modulesUrl) {
     return excludedTitlePatterns.some((pattern) => normalized.includes(pattern));
   };
 
-  const links = await page.evaluate((baseUrl) => {
-    const toAbsolute = (href) => {
-      try {
-        return new URL(href, baseUrl).href;
-      } catch {
-        return null;
-      }
-    };
+  const rawLinks = await page.evaluate(() => {
+    const anchors = Array.from(document.querySelectorAll('.ig-title, .item_link, .module-item-title a, li.context_module_item a.title'));
+    return anchors.map((a) => ({ url: a.href, title: (a.textContent || '').trim() }));
+  });
 
-    const candidates = [];
-    const moduleRoots = document.querySelectorAll('.context_modules, #context_modules, .modules, #modules');
+  const fallbackLinks = await page.evaluate(() => {
+    const items = Array.from(document.querySelectorAll('li.context_module_item'));
+    return items.flatMap((item) => {
+      const a = item.querySelector('a');
+      return a ? [{ url: a.href, title: ((item.querySelector('.item_name, .title') || a).textContent || '').trim() }] : [];
+    });
+  });
 
-    const pushLink = (a, source) => {
-      const href = a.getAttribute('href');
-      if (!href) return;
-      const abs = toAbsolute(href);
-      if (!abs) return;
-      const title = (a.textContent || a.getAttribute('title') || source || '').trim();
-      candidates.push({ url: abs, title: title || source || 'Untitled Item' });
-    };
-
-    if (moduleRoots.length > 0) {
-      moduleRoots.forEach((root) => {
-        const itemContainers = root.querySelectorAll('.context_module_item, .ig-row, li[id^="context_module_item_"]');
-        if (itemContainers.length > 0) {
-          itemContainers.forEach((container) => {
-            const link = container.querySelector('a[href]');
-            if (link) pushLink(link, 'module-item');
-          });
-        } else {
-          root.querySelectorAll('a[href]').forEach((a) => pushLink(a, 'module-root'));
-        }
-      });
-    } else {
-      document.querySelectorAll('a[href]').forEach((a) => pushLink(a, 'fallback-all-links'));
-    }
-
-    return candidates;
-  }, modulesUrl);
+  const allRaw = [...rawLinks, ...fallbackLinks];
+  console.log(`Raw module links found: ${allRaw.length}`);
+  console.log('First 10 raw titles:');
+  allRaw.slice(0, 10).forEach((link, idx) => {
+    console.log(`  ${idx + 1}. ${link.title || '(untitled)'}`);
+  });
 
   const deduped = [];
   const seen = new Set();
 
-  for (const link of links) {
+  for (const link of allRaw) {
     if (!isLikelyModuleItem(link.url, modulesUrl)) continue;
-    if (isExcludedTitle(link.title)) continue;
-    if (!String(link.title || '').trim().toLowerCase().startsWith('lesson:')) continue;
     const canonical = link.url.replace(/#.*$/, '');
     if (seen.has(canonical)) continue;
     seen.add(canonical);
-    deduped.push({ url: canonical, title: link.title || 'Untitled Item' });
+
+    const title = String(link.title || '').trim();
+    if (!title.toLowerCase().startsWith('lesson:')) continue;
+    if (isExcludedTitle(title)) continue;
+
+    deduped.push({ url: canonical, title });
   }
 
+  console.log(`Lesson-only links after filtering: ${deduped.length}`);
   return deduped;
 }
 
