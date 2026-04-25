@@ -307,8 +307,8 @@ async function collectModuleLinks(page, modulesUrl) {
   });
 
   const allRaw = [...rawLinks, ...fallbackLinks];
-  console.log(`Raw module links found: ${allRaw.length}`);
-  console.log('First 10 raw titles:');
+  console.log(`RAW MODULE LINKS FOUND: ${allRaw.length}`);
+  console.log('FIRST 10 RAW TITLES:');
   allRaw.slice(0, 10).forEach((link, idx) => {
     console.log(`  ${idx + 1}. ${link.title || '(untitled)'}`);
   });
@@ -317,8 +317,9 @@ async function collectModuleLinks(page, modulesUrl) {
   const seen = new Set();
 
   for (const link of allRaw) {
-    if (!isLikelyModuleItem(link.url, modulesUrl)) continue;
     const canonical = link.url.replace(/#.*$/, '');
+    if (!canonical || !canonical.startsWith('http')) continue;
+    if (canonical.includes('/courses/') && canonical.endsWith('/modules')) continue;
     if (seen.has(canonical)) continue;
     seen.add(canonical);
 
@@ -329,7 +330,7 @@ async function collectModuleLinks(page, modulesUrl) {
     deduped.push({ url: canonical, title });
   }
 
-  console.log(`Lesson-only links after filtering: ${deduped.length}`);
+  console.log(`LESSON LINKS AFTER FILTER: ${deduped.length}`);
   return deduped;
 }
 
