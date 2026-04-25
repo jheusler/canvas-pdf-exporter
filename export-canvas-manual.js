@@ -361,7 +361,17 @@ async function main() {
     console.log('Scrolling modules page to load all dynamic content...');
     await autoScroll(page, 70);
 
-    const items = await collectModuleLinks(page, MODULES_URL);
+    const allLessonItems = await collectModuleLinks(page, MODULES_URL);
+    let items = allLessonItems;
+    const tempLessonNumber = 42;
+    const tempLessonIndex = tempLessonNumber - 1;
+    console.log('TEMP MODE: exporting only lesson 42');
+    if (allLessonItems[tempLessonIndex]) {
+      items = [{ ...allLessonItems[tempLessonIndex], __originalOrder: tempLessonNumber }];
+    } else {
+      items = [];
+    }
+
     console.log(`Found ${items.length} lesson module item links.`);
     console.log('Filtered Lesson-only export list:');
     items.forEach((item, idx) => {
@@ -377,12 +387,13 @@ async function main() {
 
     for (let i = 0; i < items.length; i += 1) {
       const item = items[i];
-      const index = String(i + 1).padStart(3, '0');
+      const lessonOrder = item.__originalOrder || (i + 1);
+      const index = String(lessonOrder).padStart(3, '0');
       const safeTitle = cleanFileName(item.title);
       const fileName = `${index} - ${safeTitle}.pdf`;
       const outputPath = path.join(OUTPUT_DIR, fileName);
 
-      console.log(`[${index}/${String(items.length).padStart(3, '0')}] Exporting: ${item.title}`);
+      console.log(`[${index}/${String(allLessonItems.length).padStart(3, '0')}] Exporting: ${item.title}`);
       console.log(`  URL: ${item.url}`);
 
       let tab;
