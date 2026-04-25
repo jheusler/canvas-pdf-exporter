@@ -1,7 +1,12 @@
 {
   "name": "canvas-pdf-exporter",
   "version": "1.0.0",
-  "main": "export.js",
+  "description": "Export Canvas LMS module content to PDFs with Puppeteer",
+  "main": "export-canvas.js",
+  "scripts": {
+    "start": "npx -y node@20 export.js",
+    "manual": "npx -y node@20 export-canvas-manual.js"
+  },
   "dependencies": {
     "puppeteer": "^21.0.0"
   }
