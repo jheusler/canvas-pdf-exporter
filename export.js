@@ -7,6 +7,23 @@ const MODULES_URL = 'https://launchcode.instructure.com/courses/261/modules';
 const OUTPUT_DIR = path.join(__dirname, 'canvas-module-pdfs');
 const USER_DATA_DIR = path.join(__dirname, '.browser-profile');
 
+// CLI args: node export.js --start 36 --end 36 --overwrite
+const argv = process.argv.slice(2);
+function getArg(flag) {
+  const i = argv.indexOf(flag);
+  return i !== -1 ? argv[i + 1] : null;
+}
+const argStart = getArg('--start') ? parseInt(getArg('--start'), 10) - 1 : 0;
+const argEnd   = getArg('--end')   ? parseInt(getArg('--end'),   10) - 1 : Infinity;
+const argOverwrite = argv.includes('--overwrite');
+
+const WRAPPER_PHRASES = [
+  'this assignment does not count',
+  'submitting an external tool',
+  'exit course',
+  'load in a new window',
+];
+
 function cleanFileName(name) {
   return name
     .replace(/[<>:"/\\|?*\x00-\x1f]/g, '')
@@ -40,6 +57,52 @@ function waitForEnter(prompt) {
       resolve();
     });
   });
+}
+
+// Returns { url, isIframe } — the best URL to load for actual lesson content.
+// Logs diagnostics so we can see what Canvas is serving.
+async function getContentTarget(tab) {
+  // Give iframes time to initialize
+  await new Promise((r) => setTimeout(r, 2500));
+
+  const frameUrls = tab.frames()
+    .map((f) => f.url())
+    .filter((u) => u && u !== 'about:blank');
+  console.log(`    Frames (${frameUrls.length}): ${frameUrls.join(' | ')}`);
+
+  // Look for a non-Canvas iframe (SCORM/Rustici/external player)
+  const externalFrame = tab.frames().find((f) => {
+    const u = f.url();
+    return u && u !== 'about:blank' && !u.includes('launchcode.instructure.com') && u.startsWith('http');
+  });
+  if (externalFrame) {
+    console.log(`    External content frame: ${externalFrame.url()}`);
+    return { url: externalFrame.url(), isIframe: true };
+  }
+
+  // Look for Canvas-hosted LTI iframe (retrieve/borderless URL)
+  const iframeSrc = await tab.evaluate(() => {
+    const el = document.querySelector(
+      'iframe#tool_content, iframe.tool_launch, iframe[src*="retrieve"], iframe[src*="external_tools"]'
+    );
+    return el ? el.src : null;
+  });
+  if (iframeSrc) {
+    console.log(`    LTI iframe src: ${iframeSrc}`);
+    return { url: iframeSrc, isIframe: true };
+  }
+
+  // Log iframe dimensions for any iframes present
+  const iframeInfo = await tab.evaluate(() => {
+    return Array.from(document.querySelectorAll('iframe')).map((f) => ({
+      src: f.src,
+      w: f.offsetWidth,
+      h: f.offsetHeight,
+    }));
+  });
+  if (iframeInfo.length) console.log(`    iframes on page:`, JSON.stringify(iframeInfo));
+
+  return { url: null, isIframe: false };
 }
 
 const IGNORE_PATTERNS = [
@@ -116,22 +179,57 @@ function isValidLink(href) {
     return title.length > 0;
   });
 
-  console.log(`\nFound ${links.length} items to export.\n`);
+  console.log(`\nFound ${links.length} total items.`);
+  const rangeEnd = Math.min(argEnd, links.length - 1);
+  console.log(`Exporting items ${argStart + 1}–${rangeEnd + 1}.\n`);
 
-  for (let i = 0; i < links.length; i++) {
+  for (let i = argStart; i <= rangeEnd; i++) {
     const { href, title } = links[i];
     const index = String(i + 1).padStart(3, '0');
     const fileName = `${index} - ${cleanFileName(title)}.pdf`;
     const filePath = path.join(OUTPUT_DIR, fileName);
 
-    console.log(`[${index}/${links.length}] ${title}`);
+    console.log(`\n[${index}/${links.length}] ${title}`);
+    console.log(`    URL: ${href}`);
+
+    if (!argOverwrite && fs.existsSync(filePath)) {
+      console.log(`    Skipped (already exists — use --overwrite to replace)`);
+      continue;
+    }
 
     const tab = await browser.newPage();
     try {
       await tab.setViewport({ width: 1280, height: 900 });
       await tab.goto(href, { waitUntil: 'networkidle2', timeout: 45000 });
+
+      const heightBefore = await tab.evaluate(() => document.body.scrollHeight);
+      console.log(`    Page height before: ${heightBefore}px`);
+
+      // Detect iframe/content frame
+      const { url: contentUrl, isIframe } = await getContentTarget(tab);
+
+      if (isIframe && contentUrl) {
+        // Navigate directly to the actual lesson content URL
+        console.log(`    Navigating into content: ${contentUrl}`);
+        await tab.goto(contentUrl, { waitUntil: 'networkidle2', timeout: 45000 });
+      }
+
       await autoScroll(tab);
-      await new Promise((r) => setTimeout(r, 1000));
+      await new Promise((r) => setTimeout(r, 1500));
+
+      const heightAfter = await tab.evaluate(() => document.body.scrollHeight);
+      console.log(`    Page height after:  ${heightAfter}px`);
+
+      const textPreview = await tab.evaluate(() =>
+        (document.body.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 300)
+      );
+      console.log(`    Preview: ${textPreview.slice(0, 200)}`);
+
+      const isWrapper = WRAPPER_PHRASES.some((p) => textPreview.toLowerCase().includes(p));
+      if (isWrapper) {
+        console.warn(`    WARNING: Content looks like Canvas shell — PDF may be empty/wrong`);
+      }
+
       await tab.pdf({
         path: filePath,
         format: 'Letter',
@@ -140,7 +238,7 @@ function isValidLink(href) {
       });
       console.log(`    Saved: ${fileName}`);
     } catch (err) {
-      console.error(`    FAILED: ${title} — ${err.message}`);
+      console.error(`    FAILED: ${err.message}`);
     } finally {
       await tab.close();
     }

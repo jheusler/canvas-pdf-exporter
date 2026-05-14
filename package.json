@@ -2,6 +2,10 @@
   "name": "canvas-pdf-exporter",
   "version": "1.0.0",
   "main": "export.js",
+  "scripts": {
+    "start": "node export.js",
+    "manual": "node export.js"
+  },
   "dependencies": {
     "puppeteer": "^21.0.0"
   }
