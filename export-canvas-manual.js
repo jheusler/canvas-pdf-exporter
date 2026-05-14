@@ -41,6 +41,75 @@ const PROFILE_DIR = path.resolve(process.cwd(), '.canvas-profile');
 const NAV_TIMEOUT = 60000;
 const MAX_FILENAME_LENGTH = 120;
 
+function parseCliArgs(argv, env = process.env) {
+  const parsePositiveInt = (value) => {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isInteger(parsed) && parsed >= 1 ? parsed : null;
+  };
+
+  const options = {
+    start: parsePositiveInt(env.npm_config_start),
+    end: parsePositiveInt(env.npm_config_end),
+    overwrite: env.npm_config_overwrite === 'true' || env.npm_config_overwrite === '1',
+  };
+  const positionalNumbers = [];
+
+  const readValue = (arg, index) => {
+    const [, inlineValue] = arg.split('=', 2);
+    if (inlineValue !== undefined) return { value: inlineValue, nextIndex: index };
+    return { value: argv[index + 1], nextIndex: index + 1 };
+  };
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === '--overwrite') {
+      options.overwrite = true;
+      continue;
+    }
+
+    if (/^\d+$/.test(arg)) {
+      positionalNumbers.push(Number.parseInt(arg, 10));
+      continue;
+    }
+
+    if (arg === '--start' || arg.startsWith('--start=')) {
+      const { value, nextIndex } = readValue(arg, i);
+      options.start = Number.parseInt(value, 10);
+      i = nextIndex;
+      continue;
+    }
+
+    if (arg === '--end' || arg.startsWith('--end=')) {
+      const { value, nextIndex } = readValue(arg, i);
+      options.end = Number.parseInt(value, 10);
+      i = nextIndex;
+      continue;
+    }
+
+    throw new Error(`Unknown option: ${arg}`);
+  }
+
+  if (options.start === null && positionalNumbers.length > 0) {
+    options.start = positionalNumbers[0];
+  }
+
+  if (options.end === null && positionalNumbers.length > 1) {
+    options.end = positionalNumbers[1];
+  }
+
+  for (const key of ['start', 'end']) {
+    if (options[key] !== null && (!Number.isInteger(options[key]) || options[key] < 1)) {
+      throw new Error(`--${key} must be a positive lesson number.`);
+    }
+  }
+
+  if (options.start !== null && options.end !== null && options.start > options.end) {
+    throw new Error('--start must be less than or equal to --end.');
+  }
+
+  return options;
+}
+
 function cleanFileName(input) {
   const fallback = 'Untitled';
   const cleaned = String(input || fallback)
@@ -203,6 +272,117 @@ function waitForEnter(promptText) {
   });
 }
 
+async function inspectReadableContent(context, label, url, area = 0) {
+  try {
+    const data = await context.evaluate(() => {
+      const text = (document.body ? document.body.innerText : document.documentElement.innerText || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const title = document.title || '';
+      const heading = document.querySelector('h1, h2, [role="heading"]');
+      return {
+        title,
+        heading: heading ? (heading.textContent || '').replace(/\s+/g, ' ').trim() : '',
+        textLength: text.length,
+        preview: text.slice(0, 500),
+      };
+    });
+
+    return {
+      label,
+      url,
+      area,
+      title: data.title,
+      heading: data.heading,
+      textLength: data.textLength,
+      preview: data.preview,
+      context,
+    };
+  } catch (error) {
+    return {
+      label,
+      url,
+      area,
+      title: '',
+      heading: '',
+      textLength: 0,
+      preview: '',
+      error: error.message,
+      context,
+    };
+  }
+}
+
+async function inspectCaptureTargets(page) {
+  const iframeElements = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('iframe')).map((frame, index) => {
+      const rect = frame.getBoundingClientRect();
+      return {
+        index,
+        src: frame.src || frame.getAttribute('src') || '',
+        area: Math.round(Math.max(0, rect.width) * Math.max(0, rect.height)),
+      };
+    })
+  );
+
+  const targets = [
+    await inspectReadableContent(page, 'main page', page.url(), 0),
+  ];
+
+  const childFrames = page.frames().filter((frame) => frame !== page.mainFrame());
+  for (let i = 0; i < childFrames.length; i += 1) {
+    const frame = childFrames[i];
+    const iframeElement = iframeElements[i] || {};
+    targets.push(await inspectReadableContent(
+      frame,
+      `iframe ${i + 1}`,
+      frame.url() || iframeElement.src || '',
+      iframeElement.area || 0
+    ));
+  }
+
+  const chosen = targets
+    .slice()
+    .sort((a, b) => {
+      const scoreA = a.textLength + Math.min(a.area, 1000000) / 100;
+      const scoreB = b.textLength + Math.min(b.area, 1000000) / 100;
+      return scoreB - scoreA;
+    })[0];
+
+  return { iframeElements, targets, chosen };
+}
+
+function logCaptureInspection(contentType, inspection) {
+  console.log(`  CONTENT TYPE: ${contentType || 'unknown'}`);
+  console.log('  iframe src list:');
+  if (inspection.iframeElements.length === 0) {
+    console.log('    (none)');
+  } else {
+    inspection.iframeElements.forEach((frame, index) => {
+      console.log(`    ${index + 1}. ${frame.src || '(blank)'} [area=${frame.area}]`);
+    });
+  }
+
+  const chosen = inspection.chosen;
+  console.log(`  chosen capture target: ${chosen.label} | url=${chosen.url || '(blank)'} | textLength=${chosen.textLength} | area=${chosen.area}`);
+  if (chosen.error) {
+    console.log(`  chosen capture target warning: ${chosen.error}`);
+  }
+}
+
+async function finalTextPreview(page) {
+  try {
+    return await page.evaluate(() => {
+      const text = (document.body ? document.body.innerText : document.documentElement.innerText || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      return text.slice(0, 700);
+    });
+  } catch (error) {
+    return `(unable to read final text: ${error.message})`;
+  }
+}
+
 function isLikelyModuleItem(url, modulesUrl) {
   if (!url || typeof url !== 'string') return false;
   if (url.startsWith('javascript:') || url.startsWith('mailto:') || url.startsWith('tel:')) return false;
@@ -335,7 +515,10 @@ async function collectModuleLinks(page, modulesUrl) {
 }
 
 async function main() {
+  const options = parseCliArgs(process.argv.slice(2));
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+
+  console.log(`Options: start=${options.start || 1}, end=${options.end || 'last'}, overwrite=${options.overwrite ? 'yes' : 'no'}`);
 
   console.log('Launching browser...');
   const browser = await puppeteer.launch({
@@ -362,20 +545,22 @@ async function main() {
     await autoScroll(page, 70);
 
     const allLessonItems = await collectModuleLinks(page, MODULES_URL);
-    let items = allLessonItems;
-    const tempLessonNumber = 42;
-    const tempLessonIndex = tempLessonNumber - 1;
-    console.log('TEMP MODE: exporting only lesson 42');
-    if (allLessonItems[tempLessonIndex]) {
-      items = [{ ...allLessonItems[tempLessonIndex], __originalOrder: tempLessonNumber }];
-    } else {
-      items = [];
+    const numberedLessonItems = allLessonItems.map((item, idx) => ({
+      ...item,
+      __originalOrder: idx + 1,
+    }));
+    const start = options.start || 1;
+    const end = options.end || numberedLessonItems.length;
+    const items = numberedLessonItems.filter((item) => item.__originalOrder >= start && item.__originalOrder <= end);
+
+    if (options.start !== null || options.end !== null) {
+      console.log(`Range mode: exporting lessons ${start} through ${end}`);
     }
 
     console.log(`Found ${items.length} lesson module item links.`);
     console.log('Filtered Lesson-only export list:');
-    items.forEach((item, idx) => {
-      console.log(`  ${String(idx + 1).padStart(3, '0')}. ${item.title}`);
+    items.forEach((item) => {
+      console.log(`  ${String(item.__originalOrder).padStart(3, '0')}. ${item.title}`);
     });
 
     if (items.length === 0) {
@@ -396,44 +581,45 @@ async function main() {
       console.log(`[${index}/${String(allLessonItems.length).padStart(3, '0')}] Exporting: ${item.title}`);
       console.log(`  URL: ${item.url}`);
 
+      if (fs.existsSync(outputPath) && !options.overwrite) {
+        console.log(`  Skipped existing PDF (use --overwrite to regenerate): ${outputPath}`);
+        continue;
+      }
+
       let tab;
       try {
         tab = await browser.newPage();
         tab.setDefaultNavigationTimeout(NAV_TIMEOUT);
         tab.setDefaultTimeout(NAV_TIMEOUT);
 
-        await tab.goto(item.url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+        const initialResponse = await tab.goto(item.url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
         await tab.waitForSelector('body', { timeout: 15000 });
         await tab.waitForTimeout(2500);
 
-        const iframeData = await tab.evaluate(() => {
-          const iframes = Array.from(document.querySelectorAll('iframe'));
-          if (iframes.length === 0) return null;
-          let best = null;
-          for (const frame of iframes) {
-            const rect = frame.getBoundingClientRect();
-            const area = Math.max(0, rect.width) * Math.max(0, rect.height);
-            if (!best || area > best.area) {
-              best = {
-                area,
-                src: frame.src || '',
-              };
-            }
-          }
-          return best;
-        });
-        const hasIframeContent = Boolean(iframeData && iframeData.src && iframeData.src !== 'about:blank');
-        if (hasIframeContent) {
-          console.log(`  Iframe detected: yes (${iframeData.src})`);
+        let contentType = initialResponse ? initialResponse.headers()['content-type'] : '';
+        let inspection = await inspectCaptureTargets(tab);
+        logCaptureInspection(contentType, inspection);
+
+        const chosenUrl = inspection.chosen && inspection.chosen.url ? inspection.chosen.url : '';
+        const shouldNavigateToChosenFrame =
+          inspection.chosen &&
+          inspection.chosen.label !== 'main page' &&
+          chosenUrl &&
+          chosenUrl !== 'about:blank' &&
+          chosenUrl !== tab.url();
+
+        if (shouldNavigateToChosenFrame) {
           try {
-            await tab.goto(iframeData.src, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+            const frameResponse = await tab.goto(chosenUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+            contentType = frameResponse ? frameResponse.headers()['content-type'] : contentType;
             await tab.waitForSelector('body', { timeout: 15000 });
             await tab.waitForTimeout(2500);
+            inspection = await inspectCaptureTargets(tab);
+            console.log('  chosen capture target: navigated to selected iframe content for PDF capture');
+            console.log(`  CONTENT TYPE: ${contentType || 'unknown'}`);
           } catch {
-            console.log('  Iframe navigation unavailable, continuing with main page content.');
+            console.log('  chosen capture target: iframe navigation unavailable, continuing with current page content.');
           }
-        } else {
-          console.log('  Iframe detected: no');
         }
 
         try {
@@ -455,6 +641,9 @@ async function main() {
         });
 
         await tab.waitForTimeout(1000);
+        const preview = await finalTextPreview(tab);
+        console.log(`  final captured text preview: ${preview || '(empty)'}`);
+
         const finalPageHeight = await tab.evaluate(() =>
           Math.max(
             document.body ? document.body.scrollHeight : 0,

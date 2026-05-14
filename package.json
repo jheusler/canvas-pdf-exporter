@@ -4,8 +4,8 @@
   "description": "Export Canvas LMS module content to PDFs with Puppeteer",
   "main": "export-canvas.js",
   "scripts": {
-    "start": "node export-canvas.js",
-    "manual": "node export-canvas-manual.js"
+    "start": "npx -y node@20 export-canvas.js",
+    "manual": "npx -y node@20 export-canvas-manual.js"
   },
   "dependencies": {
     "puppeteer": "^21.0.0"
